@@ -1,0 +1,33 @@
+name: Daily AR Chase
+
+on:
+  schedule:
+    # 9am Brisbane (AEST, UTC+10) = 23:00 UTC. Mon-Fri only.
+    # Note: Brisbane doesn't observe DST, so this is correct year-round.
+    - cron: "0 23 * * 0-4"
+  workflow_dispatch:  # also allow manual triggering from the Actions tab
+
+jobs:
+  chase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run AR chase
+        env:
+          XERO_CLIENT_ID: ${{ secrets.XERO_CLIENT_ID }}
+          XERO_CLIENT_SECRET: ${{ secrets.XERO_CLIENT_SECRET }}
+          XERO_TENANT_ID: ${{ secrets.XERO_TENANT_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          FALLBACK_SLACK_USER: ${{ secrets.FALLBACK_SLACK_USER }}
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}
+        run: python overdue_chase.py

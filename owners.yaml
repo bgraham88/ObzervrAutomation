@@ -1,0 +1,32 @@
+# Customer -> Owner mapping for the AR chase bot.
+#
+# Each entry maps a Xero customer to an internal owner who should be
+# DM'd when that customer has overdue invoices.
+#
+# Matching priority:
+#   1. contact_id (preferred — robust against renames in Xero)
+#   2. name (case-insensitive exact match — fallback if contact_id missing)
+#
+# Fields:
+#   name           : Xero contact name (exactly as it appears in Xero)
+#   contact_id     : Optional Xero ContactID (UUID). Recommended for stability.
+#   email          : Owner's Obzervr email. Used to look up their Slack user
+#                    automatically if slack_user_id is not provided.
+#   slack_user_id  : Optional Slack user ID (starts with 'U'). Faster than
+#                    email lookup. Find via Slack profile -> More -> Copy member ID.
+#   display_name   : Optional. How the owner is greeted in the DM ("Hi Tania").
+#                    Defaults to email if not set.
+#
+# Tip: keep this list sorted by customer name. The script reads it top-to-bottom.
+
+- name: "Roy Hill Iron Ore Pty Ltd"
+  email: tania@obzervr.com
+  display_name: Tania
+
+- name: "Anglo American Steelmaking Coal Pty Ltd"
+  email: tania@obzervr.com
+  display_name: Tania
+
+- name: "Bluescope Steel Ltd"
+  email: brett.graham@obzervr.com
+  display_name: Brett

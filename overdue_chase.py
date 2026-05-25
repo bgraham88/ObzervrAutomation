@@ -1,5 +1,13 @@
 """
 Obzervr Overdue Invoice Chase
+-----------------------------
+Pulls overdue invoices from Xero, groups them by customer, looks up the
+internal owner for each customer in owners.yaml, and DMs that owner via
+Slack with their list.
+
+Runs daily on weekday mornings via GitHub Actions.
+
+Set DRY_RUN=true to print messages without actually sending.
 """
 
 import os
@@ -12,17 +20,24 @@ from decimal import Decimal
 import requests
 import yaml
 
+# -------------------------------------------------------------------
+# Config from environment
+# -------------------------------------------------------------------
 XERO_CLIENT_ID = os.environ["XERO_CLIENT_ID"]
 XERO_CLIENT_SECRET = os.environ["XERO_CLIENT_SECRET"]
 XERO_TENANT_ID = os.environ["XERO_TENANT_ID"]
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-FALLBACK_SLACK_USER = os.environ.get("FALLBACK_SLACK_USER", "")
+FALLBACK_SLACK_USER = os.environ.get("FALLBACK_SLACK_USER", "")  # your own user ID or email
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 OWNERS_FILE = "owners.yaml"
 
 
+# -------------------------------------------------------------------
+# Xero
+# -------------------------------------------------------------------
 def get_xero_token() -> str:
+    """Exchange client credentials for an access token."""
     resp = requests.post(
         "https://identity.xero.com/connect/token",
         auth=(XERO_CLIENT_ID, XERO_CLIENT_SECRET),
@@ -33,26 +48,17 @@ def get_xero_token() -> str:
     return resp.json()["access_token"]
 
 
-def parse_xero_date(s):
-    if not s:
-        return None
-    if s.startswith("/Date("):
-        ms = int(s[6:].split("+")[0].split("-")[0])
-        return datetime.utcfromtimestamp(ms / 1000).date()
-    try:
-        return datetime.fromisoformat(s.replace("Z", "")).date()
-    except ValueError:
-        return None
-
-
-def fetch_overdue_invoices(access_token):
+def fetch_overdue_invoices(access_token: str) -> list[dict]:
+    """Return all AUTHORISED invoices with DueDate before today."""
     today = date.today().strftime("%Y, %m, %d")
     where_clause = f'Status=="AUTHORISED" AND Type=="ACCREC" AND DueDate<DateTime({today})'
+
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Xero-Tenant-Id": XERO_TENANT_ID,
         "Accept": "application/json",
     }
+
     invoices = []
     page = 1
     while True:
@@ -71,6 +77,7 @@ def fetch_overdue_invoices(access_token):
             break
         page += 1
 
+    # Defensive: filter again client-side and exclude anything with AmountDue == 0
     today_iso = date.today()
     overdue = []
     for inv in invoices:
@@ -87,13 +94,32 @@ def fetch_overdue_invoices(access_token):
         inv["_days_overdue"] = (today_iso - due_date).days
         overdue.append(inv)
     return overdue
-    def load_owners():
-        with open(OWNERS_FILE) as f:
-            data = yaml.safe_load(f) or []
-        return data
 
 
-def find_owner(contact_name, contact_id, owners):
+def parse_xero_date(s: str | None):
+    """Xero returns dates either as '2025-04-15T00:00:00' or '/Date(1681516800000+0000)/'."""
+    if not s:
+        return None
+    if s.startswith("/Date("):
+        ms = int(s[6:].split("+")[0].split("-")[0])
+        return datetime.utcfromtimestamp(ms / 1000).date()
+    try:
+        return datetime.fromisoformat(s.replace("Z", "")).date()
+    except ValueError:
+        return None
+
+
+# -------------------------------------------------------------------
+# Owner mapping
+# -------------------------------------------------------------------
+def load_owners() -> list[dict]:
+    with open(OWNERS_FILE) as f:
+        data = yaml.safe_load(f) or []
+    return data
+
+
+def find_owner(contact_name: str, contact_id: str, owners: list[dict]) -> dict | None:
+    """Match by ContactID first (robust), then by name (case-insensitive)."""
     for o in owners:
         if o.get("contact_id") and contact_id and o["contact_id"] == contact_id:
             return o
@@ -103,7 +129,15 @@ def find_owner(contact_name, contact_id, owners):
     return None
 
 
-def slack_call(method, payload, form=False):
+# -------------------------------------------------------------------
+# Slack
+# -------------------------------------------------------------------
+def slack_call(method: str, payload: dict, form: bool = False) -> dict:
+    """Call a Slack Web API method.
+
+    Most write methods (chat.postMessage, conversations.open) accept JSON bodies.
+    Lookup methods (users.lookupByEmail) require form-encoded data.
+    """
     if form:
         resp = requests.post(
             f"https://slack.com/api/{method}",
@@ -128,7 +162,8 @@ def slack_call(method, payload, form=False):
     return body
 
 
-def resolve_slack_user(owner):
+def resolve_slack_user(owner: dict) -> str | None:
+    """Return a Slack user ID. Use slack_user_id if provided, else look up by email."""
     if owner.get("slack_user_id"):
         return owner["slack_user_id"]
     if owner.get("email"):
@@ -141,20 +176,27 @@ def resolve_slack_user(owner):
     return None
 
 
-def send_dm(slack_user_id, text):
+def send_dm(slack_user_id: str, text: str) -> None:
     if DRY_RUN:
         print(f"  [DRY RUN] Would DM {slack_user_id}:\n{text}\n")
         return
+    # Open DM channel, then post
     im = slack_call("conversations.open", {"users": slack_user_id})
     channel = im["channel"]["id"]
     slack_call("chat.postMessage", {"channel": channel, "text": text, "unfurl_links": False})
 
 
-def format_amount(d):
+# -------------------------------------------------------------------
+# Message formatting
+# -------------------------------------------------------------------
+def format_amount(d: Decimal) -> str:
     return f"${d:,.2f}"
 
-def format_owner_message(owner_label, customers):
-    total = sum(sum(inv["_amount_due"] for inv in invs) for invs in customers.values())
+
+def format_owner_message(owner_label: str, customers: dict) -> str:
+    total = sum(
+        sum(inv["_amount_due"] for inv in invs) for invs in customers.values()
+    )
     lines = [
         f"Good morning {owner_label} :wave:",
         "",
@@ -175,9 +217,9 @@ def format_owner_message(owner_label, customers):
     return "\n".join(lines)
 
 
-owner_label_cache = {}
-
-
+# -------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------
 def main():
     print(f"Run mode: {'DRY RUN' if DRY_RUN else 'LIVE'}")
     print("Fetching Xero token...")
@@ -194,8 +236,9 @@ def main():
     owners = load_owners()
     print(f"Loaded {len(owners)} owner mappings.")
 
-    by_owner = defaultdict(lambda: defaultdict(list))
-    unmapped = defaultdict(list)
+    # Group invoices: owner -> customer -> [invoices]
+    by_owner: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    unmapped: dict[str, list[dict]] = defaultdict(list)
 
     for inv in invoices:
         contact = inv.get("Contact", {})
@@ -209,6 +252,7 @@ def main():
         else:
             unmapped[contact_name].append(inv)
 
+    # Send a DM to each owner
     for owner_key, customers in by_owner.items():
         owner = owner_label_cache[owner_key]
         owner_label = owner.get("display_name") or owner.get("email") or "there"
@@ -220,21 +264,25 @@ def main():
         print(f"Sending DM to {owner_label} ({slack_user_id})...")
         send_dm(slack_user_id, msg)
 
+    # Send unmapped to fallback user (you)
     if unmapped and FALLBACK_SLACK_USER:
-        lines = [":warning: *Overdue invoices with no owner mapped:*", ""]
+        lines = [
+            ":warning: *Overdue invoices with no owner mapped:*",
+            "",
+        ]
         for customer_name, invs in sorted(unmapped.items()):
             total = sum(inv["_amount_due"] for inv in invs)
             lines.append(f"• *{customer_name}* — {format_amount(total)} across {len(invs)} invoice(s)")
         lines.append("")
         lines.append("Add these customers to `owners.yaml` so they get chased.")
-        if FALLBACK_SLACK_USER.startswith("U"):
-            fallback_id = FALLBACK_SLACK_USER
-        else:
-            fallback_id = resolve_slack_user({"email": FALLBACK_SLACK_USER})
+        fallback_id = resolve_slack_user({"slack_user_id": FALLBACK_SLACK_USER} if FALLBACK_SLACK_USER.startswith("U") else {"email": FALLBACK_SLACK_USER})
         if fallback_id:
             send_dm(fallback_id, "\n".join(lines))
 
     print("Done.")
+
+
+owner_label_cache: dict[str, dict] = {}
 
 
 if __name__ == "__main__":

@@ -88,9 +88,9 @@ def fetch_overdue_invoices(access_token):
         overdue.append(inv)
     return overdue
     def load_owners():
-    with open(OWNERS_FILE) as f:
-        data = yaml.safe_load(f) or []
-    return data
+        with open(OWNERS_FILE) as f:
+            data = yaml.safe_load(f) or []
+        return data
 
 
 def find_owner(contact_name, contact_id, owners):
